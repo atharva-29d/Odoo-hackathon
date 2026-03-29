@@ -2,6 +2,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.utils.constants import VALID_APP_ROLES, VALID_APPROVAL_ROLES, VALID_APPROVAL_RULES
+
 
 class AppBaseModel(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
@@ -26,7 +28,7 @@ class SignupRequest(AppBaseModel):
     @field_validator("approval_rule")
     @classmethod
     def validate_approval_rule(cls, value: str) -> str:
-        if value not in {"percentage", "specific", "hybrid"}:
+        if value not in VALID_APPROVAL_RULES:
             raise ValueError("Please select a valid approval rule")
         return value
 
@@ -49,6 +51,71 @@ class LoginRequest(AppBaseModel):
         if not cleaned:
             raise ValueError("This field is required")
         return cleaned
+
+
+class WorkflowStepInput(AppBaseModel):
+    level_key: str = Field(alias="levelKey")
+    label: str
+    approver_role: str = Field(alias="approverRole")
+
+    @field_validator("level_key", "label", "approver_role")
+    @classmethod
+    def validate_step_fields(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("This field is required")
+        return cleaned
+
+    @field_validator("approver_role")
+    @classmethod
+    def validate_approver_role(cls, value: str) -> str:
+        if value not in VALID_APPROVAL_ROLES:
+            raise ValueError("Please choose a valid approval role")
+        return value
+
+
+class UpdateCompanySettingsRequest(AppBaseModel):
+    approval_rule: str = Field(alias="approvalRule")
+    approval_threshold: float = Field(alias="approvalThreshold")
+    auto_approve_amount: float = Field(alias="autoApproveAmount")
+    high_amount_threshold: float = Field(alias="highAmountThreshold")
+    high_amount_required_approvals: int = Field(alias="highAmountRequiredApprovals")
+    workflow_steps: list[WorkflowStepInput] = Field(alias="workflowSteps")
+
+    @field_validator("approval_rule")
+    @classmethod
+    def validate_rule(cls, value: str) -> str:
+        if value not in VALID_APPROVAL_RULES:
+            raise ValueError("Please select a valid approval rule")
+        return value
+
+    @field_validator("approval_threshold")
+    @classmethod
+    def validate_threshold(cls, value: float) -> float:
+        if value <= 0 or value > 1:
+            raise ValueError("Approval threshold must be between 0 and 1")
+        return round(value, 2)
+
+    @field_validator("auto_approve_amount", "high_amount_threshold")
+    @classmethod
+    def validate_amount_thresholds(cls, value: float) -> float:
+        if value < 0:
+            raise ValueError("Threshold amounts must be zero or greater")
+        return round(value, 2)
+
+    @field_validator("high_amount_required_approvals")
+    @classmethod
+    def validate_required_approvals(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("At least one approval is required")
+        return value
+
+    @field_validator("workflow_steps")
+    @classmethod
+    def validate_workflow_steps(cls, value: list[WorkflowStepInput]) -> list[WorkflowStepInput]:
+        if not value:
+            raise ValueError("Add at least one workflow step")
+        return value
 
 
 class CreateUserRequest(AppBaseModel):
@@ -79,8 +146,16 @@ class CreateUserRequest(AppBaseModel):
     @field_validator("role")
     @classmethod
     def validate_role(cls, value: str) -> str:
-        if value not in {"admin", "manager", "employee"}:
+        if value not in VALID_APP_ROLES:
             raise ValueError("Please select a valid role")
+        return value
+
+    @field_validator("approval_roles")
+    @classmethod
+    def validate_approval_roles(cls, value: list[str]) -> list[str]:
+        invalid = [item for item in value if item not in VALID_APPROVAL_ROLES]
+        if invalid:
+            raise ValueError("Please choose valid approval roles")
         return value
 
 

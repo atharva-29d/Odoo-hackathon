@@ -1,3 +1,4 @@
+from app.core.security import delete_firebase_user_by_email
 from app.services.reimbursement_service import (
     clear_collection,
     create_company_and_admin,
@@ -17,7 +18,10 @@ def with_company(user: dict):
 
 
 def main():
-    for collection_name in ["approvals", "expenses", "users", "companies"]:
+    for email in ["admin@acme.local", "manager@acme.local", "employee@acme.local", "nisha@acme.local"]:
+        delete_firebase_user_by_email(email)
+
+    for collection_name in ["audit_logs", "approvals", "expenses", "users", "companies"]:
         clear_collection(collection_name)
 
     create_company_and_admin(

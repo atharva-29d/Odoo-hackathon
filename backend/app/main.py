@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.api.routes import approvals, auth, expenses, users
+from app.api.routes import approvals, auth, company, expenses, users
 from app.core.config import get_settings
 from app.core.exceptions import ApiError
 
@@ -73,5 +73,6 @@ async def health_check():
 
 app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
 app.include_router(users.router, prefix="/api/users", tags=["users"])
+app.include_router(company.router, prefix="/api/company", tags=["company"])
 app.include_router(expenses.router, prefix="/api/expenses", tags=["expenses"])
 app.include_router(approvals.router, prefix="/api/approvals", tags=["approvals"])

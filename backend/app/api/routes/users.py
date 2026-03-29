@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends
 
-from app.api.deps import get_current_user, require_roles
+from app.api.deps import require_roles
 from app.models.schemas import CreateUserRequest
 from app.services.reimbursement_service import create_user_record, list_users_for_actor
 
@@ -8,7 +8,7 @@ router = APIRouter()
 
 
 @router.get("")
-def get_users(current_user=Depends(require_roles("admin", "manager"))):
+def get_users(current_user=Depends(require_roles("admin"))):
     return {
         "data": list_users_for_actor(current_user),
     }

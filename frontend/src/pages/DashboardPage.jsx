@@ -1,8 +1,16 @@
-import { ArrowRight, CheckCircle2, ClipboardList, IndianRupee, ReceiptText, Users2 } from "lucide-react";
+import {
+  ArrowRight,
+  ClipboardList,
+  ReceiptText,
+  ShieldCheck,
+  Sparkles,
+  Users2
+} from "lucide-react";
 import { Link } from "react-router-dom";
 import { useEffect, useState } from "react";
 
 import { api, extractErrorMessage } from "../api/client";
+import DownloadReportButton from "../components/DownloadReportButton";
 import EmptyState from "../components/EmptyState";
 import LoadingScreen from "../components/LoadingScreen";
 import PageHeader from "../components/PageHeader";
@@ -17,7 +25,8 @@ function DashboardPage() {
     myExpenses: [],
     teamExpenses: [],
     pendingApprovals: [],
-    users: []
+    users: [],
+    auditLogs: []
   });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -35,8 +44,12 @@ function DashboardPage() {
 
         if (["admin", "manager"].includes(user?.role)) {
           requests.push(api.get("/expenses"));
-          requests.push(api.get("/approvals/pending"));
+          requests.push(api.get("/expenses/pending"));
+        }
+
+        if (user?.role === "admin") {
           requests.push(api.get("/users"));
+          requests.push(api.get("/company/audit-logs"));
         }
 
         const responses = await Promise.all(requests);
@@ -49,7 +62,8 @@ function DashboardPage() {
           myExpenses: responses[0]?.data?.data || [],
           teamExpenses: responses[1]?.data?.data || [],
           pendingApprovals: responses[2]?.data?.data || [],
-          users: responses[3]?.data?.data || []
+          users: responses[3]?.data?.data || [],
+          auditLogs: responses[4]?.data?.data || []
         });
         setError("");
       } catch (requestError) {
@@ -73,39 +87,35 @@ function DashboardPage() {
   }, [user?.role]);
 
   if (loading) {
-    return <LoadingScreen label="Loading dashboard metrics" />;
+    return <LoadingScreen label="Loading dashboard" />;
   }
 
-  const myApproved = state.myExpenses.filter((expense) => expense.status === "approved").length;
-  const myPending = state.myExpenses.filter((expense) => ["pending", "in_review"].includes(expense.status)).length;
-  const mySpend = state.myExpenses.reduce((total, expense) => total + Number(expense.convertedAmount || 0), 0);
-  const companySpend = state.teamExpenses.reduce((total, expense) => total + Number(expense.convertedAmount || 0), 0);
-  const recentExpenses = (state.teamExpenses.length ? state.teamExpenses : state.myExpenses).slice(0, 5);
+  const visibleExpenses = state.teamExpenses.length ? state.teamExpenses : state.myExpenses;
+  const recentExpenses = visibleExpenses.slice(0, 5);
+  const queuePreview = state.pendingApprovals.slice(0, 4);
+  const totalSpend = visibleExpenses.reduce((total, expense) => total + Number(expense.convertedAmount || 0), 0);
+  const pendingCount = visibleExpenses.filter((expense) => ["pending", "in_review"].includes(expense.status)).length;
+  const approvedAmount = visibleExpenses
+    .filter((expense) => expense.status === "approved")
+    .reduce((total, expense) => total + Number(expense.convertedAmount || 0), 0);
+  const rejectedCount = visibleExpenses.filter((expense) => expense.status === "rejected").length;
 
   return (
     <div>
       <PageHeader
         eyebrow="Overview"
-        title={`Welcome back, ${user?.name?.split(" ")[0] || "there"}`}
-        description="Track reimbursement health, pending actions, and the latest claims from one place."
+        title="Dashboard"
+        description="Expenses, approvals, and company activity in one place."
         actions={
           <>
+            <DownloadReportButton scope={["admin", "manager"].includes(user?.role) ? "company" : "my"} label="Export report" />
             <Link
               to="/submit-expense"
               className="inline-flex items-center gap-2 rounded-2xl bg-slate-950 px-4 py-3 text-sm font-semibold text-white transition hover:bg-slate-800"
             >
-              Submit expense
+              New expense
               <ArrowRight size={16} />
             </Link>
-            {["admin", "manager"].includes(user?.role) ? (
-              <Link
-                to="/approvals"
-                className="inline-flex items-center gap-2 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-700 transition hover:border-brand-300 hover:text-brand-700"
-              >
-                Review approvals
-                <ClipboardList size={16} />
-              </Link>
-            ) : null}
           </>
         }
       />
@@ -113,26 +123,104 @@ function DashboardPage() {
       {error ? <div className="mb-6 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{error}</div> : null}
 
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        <StatCard icon={ReceiptText} title="My expenses" value={state.myExpenses.length} note="All submitted claims" />
-        <StatCard icon={CheckCircle2} title="Approved claims" value={myApproved} note="Ready for reimbursement" tone="success" />
-        <StatCard icon={ClipboardList} title="Pending reviews" value={state.pendingApprovals.length} note="Current approval queue" tone="warning" />
-        <StatCard
-          icon={IndianRupee}
-          title={user?.role === "employee" ? "My spend" : "Company spend"}
-          value={formatCurrency(user?.role === "employee" ? mySpend : companySpend, company?.baseCurrency)}
-          note={`Base currency ${company?.baseCurrency || "USD"}`}
-          tone="slate"
-        />
+        <StatCard icon={ReceiptText} title="Total Expenses" value={visibleExpenses.length} note="Current scope" />
+        <StatCard icon={ClipboardList} title="Pending" value={pendingCount} note="Waiting for review" tone="warning" />
+        <StatCard icon={ShieldCheck} title="Approved Amount" value={formatCurrency(approvedAmount, company?.baseCurrency)} note="In company currency" tone="success" />
+        <StatCard icon={Users2} title="Rejected" value={rejectedCount} note="Closed requests" tone="slate" />
       </div>
 
-      <div className="mt-8 grid gap-6 xl:grid-cols-[1.2fr_0.8fr]">
+      <div className="mt-6 grid gap-6 xl:grid-cols-[0.92fr_1.08fr]">
         <section className="card-shell">
           <div className="flex items-center justify-between gap-3">
             <div>
-              <h2 className="text-lg font-semibold text-slate-900">Recent expenses</h2>
-              <p className="mt-1 text-sm text-slate-500">
-                {user?.role === "employee" ? "Your latest submitted requests" : "Latest team and company claims"}
-              </p>
+              <p className="mini-label">Quick Actions</p>
+              <h2 className="mt-3 panel-title">Start from here</h2>
+            </div>
+            <Sparkles className="text-brand-500" size={18} />
+          </div>
+
+          <div className="mt-6 grid gap-3">
+            <QuickActionCard
+              to="/submit-expense"
+              title="Create expense"
+              description="Upload a receipt and submit a new request."
+              tone="brand"
+            />
+            {["admin", "manager"].includes(user?.role) ? (
+              <QuickActionCard
+                to="/approvals"
+                title="Open approvals"
+                description="Review requests waiting in your queue."
+                tone="accent"
+              />
+            ) : null}
+            {user?.role === "admin" ? (
+              <QuickActionCard
+                to="/admin"
+                title="Manage workspace"
+                description="Users, rules, and workflow settings."
+                tone="slate"
+              />
+            ) : (
+              <div className="rounded-[1.4rem] border border-slate-200/80 bg-slate-50/80 p-4 dark:border-slate-800 dark:bg-slate-900/80">
+                <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-400">Company spend</p>
+                <p className="mt-3 text-3xl font-semibold tracking-tight text-slate-950 dark:text-slate-50">
+                  {formatCurrency(totalSpend, company?.baseCurrency)}
+                </p>
+              </div>
+            )}
+          </div>
+        </section>
+
+        <section className="card-shell">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <p className="mini-label">Approval Queue</p>
+              <h2 className="mt-3 panel-title">Needs attention</h2>
+            </div>
+            {["admin", "manager"].includes(user?.role) ? (
+              <Link to="/approvals" className="text-sm font-semibold text-brand-600">
+                View all
+              </Link>
+            ) : null}
+          </div>
+
+          {queuePreview.length === 0 ? (
+            <div className="mt-6 rounded-[1.4rem] border border-dashed border-slate-200 bg-slate-50/70 p-6 text-sm text-slate-500 dark:border-slate-800 dark:bg-slate-900/70 dark:text-slate-300">
+              No approvals are waiting right now.
+            </div>
+          ) : (
+            <div className="mt-6 space-y-3">
+              {queuePreview.map((approval) => (
+                <div key={approval._id} className="rounded-[1.4rem] border border-slate-200/80 bg-white p-4 dark:border-slate-800 dark:bg-slate-900">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="font-semibold text-slate-950 dark:text-slate-50">{approval.expense?.employee?.name || "Expense"}</p>
+                      <p className="mt-1 text-sm text-slate-500 dark:text-slate-300">
+                        {approval.levelLabel} • {approval.expense?.category}
+                      </p>
+                    </div>
+                    <StatusBadge status={approval.status} />
+                  </div>
+                  <div className="mt-4 flex items-center justify-between gap-3 text-sm">
+                    <span className="text-slate-500 dark:text-slate-300">{formatDate(approval.expense?.expenseDate)}</span>
+                    <span className="font-semibold text-slate-950 dark:text-slate-50">
+                      {formatCurrency(approval.expense?.convertedAmount, approval.expense?.companyCurrency)}
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+      </div>
+
+      <div className="mt-6 grid gap-6 xl:grid-cols-[1.15fr_0.85fr]">
+        <section className="card-shell">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <p className="mini-label">Recent</p>
+              <h2 className="mt-3 panel-title">Latest expenses</h2>
             </div>
             <Link to="/my-expenses" className="text-sm font-semibold text-brand-600">
               View all
@@ -141,33 +229,28 @@ function DashboardPage() {
 
           {recentExpenses.length === 0 ? (
             <div className="mt-6">
-              <EmptyState title="No expenses yet" description="Submit the first reimbursement request to start your workflow." />
+              <EmptyState title="No expenses yet" description="Create your first request to start the workflow." />
             </div>
           ) : (
             <div className="mt-6 overflow-x-auto scrollbar-thin">
-              <table className="min-w-full text-left text-sm">
-                <thead className="text-slate-400">
+              <table className="data-table">
+                <thead>
                   <tr>
-                    <th className="pb-3 font-medium">Employee</th>
-                    <th className="pb-3 font-medium">Category</th>
-                    <th className="pb-3 font-medium">Amount</th>
-                    <th className="pb-3 font-medium">Date</th>
-                    <th className="pb-3 font-medium">Status</th>
+                    <th>Employee</th>
+                    <th>Category</th>
+                    <th>Amount</th>
+                    <th>Date</th>
+                    <th>Status</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-slate-100">
+                <tbody>
                   {recentExpenses.map((expense) => (
                     <tr key={expense._id}>
-                      <td className="py-4 font-medium text-slate-900">{expense.employee?.name || user?.name}</td>
-                      <td className="py-4 text-slate-600">{expense.category}</td>
-                      <td className="py-4 text-slate-600">
-                        {formatCurrency(expense.submittedAmount, expense.submittedCurrency)}{" "}
-                        <span className="text-xs text-slate-400">
-                          ({formatCurrency(expense.convertedAmount, expense.companyCurrency)})
-                        </span>
-                      </td>
-                      <td className="py-4 text-slate-600">{formatDate(expense.expenseDate)}</td>
-                      <td className="py-4">
+                      <td className="font-medium text-slate-900 dark:text-slate-50">{expense.employee?.name || user?.name}</td>
+                      <td>{expense.category}</td>
+                      <td>{formatCurrency(expense.convertedAmount, expense.companyCurrency)}</td>
+                      <td>{formatDate(expense.expenseDate)}</td>
+                      <td>
                         <StatusBadge status={expense.status} />
                       </td>
                     </tr>
@@ -178,45 +261,65 @@ function DashboardPage() {
           )}
         </section>
 
-        <section className="space-y-6">
-          <div className="card-shell bg-hero text-white">
-            <p className="text-sm font-semibold uppercase tracking-[0.25em] text-brand-100">Quick snapshot</p>
-            <h3 className="mt-3 text-2xl font-bold">Approvals refresh automatically every 15 seconds.</h3>
-            <p className="mt-3 text-sm text-white/80">
-              Your managers and admins always see the newest queue without refreshing the app manually.
-            </p>
-          </div>
-
-          <div className="card-shell">
-            <div className="flex items-center justify-between gap-3">
-              <div>
-                <h2 className="text-lg font-semibold text-slate-900">Team summary</h2>
-                <p className="mt-1 text-sm text-slate-500">People and reimbursement activity across the workspace.</p>
-              </div>
-              <Users2 className="text-brand-500" size={20} />
-            </div>
-
-            <div className="mt-6 grid gap-4 sm:grid-cols-2">
-              <div className="rounded-2xl bg-slate-50 p-4">
-                <p className="text-sm text-slate-500">Pending for me</p>
-                <p className="mt-2 text-2xl font-bold text-slate-900">{state.pendingApprovals.length}</p>
-              </div>
-              <div className="rounded-2xl bg-slate-50 p-4">
-                <p className="text-sm text-slate-500">Users in workspace</p>
-                <p className="mt-2 text-2xl font-bold text-slate-900">{state.users.length || 1}</p>
-              </div>
-              <div className="rounded-2xl bg-slate-50 p-4">
-                <p className="text-sm text-slate-500">Pending claims</p>
-                <p className="mt-2 text-2xl font-bold text-slate-900">{myPending}</p>
-              </div>
-              <div className="rounded-2xl bg-slate-50 p-4">
-                <p className="text-sm text-slate-500">Approval rule</p>
-                <p className="mt-2 text-lg font-semibold text-slate-900">{company?.approvalRule || "hybrid"}</p>
-              </div>
+        <section className="card-shell">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <p className="mini-label">{user?.role === "admin" ? "Audit" : "Summary"}</p>
+              <h2 className="mt-3 panel-title">{user?.role === "admin" ? "Latest activity" : "Workspace summary"}</h2>
             </div>
           </div>
+
+          {user?.role === "admin" && state.auditLogs.length ? (
+            <div className="mt-6 space-y-3">
+              {state.auditLogs.slice(0, 4).map((log) => (
+                <div key={log._id} className="rounded-[1.4rem] border border-slate-200/80 bg-slate-50/70 p-4 dark:border-slate-800 dark:bg-slate-900/80">
+                  <p className="font-medium text-slate-950 dark:text-slate-50">{log.message}</p>
+                  <p className="mt-1 text-sm text-slate-500 dark:text-slate-300">{log.actor?.name || "System"}</p>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="mt-6 grid gap-3 sm:grid-cols-2">
+              <SummaryMini label="Users" value={state.users.length || 1} />
+              <SummaryMini label="Queue" value={state.pendingApprovals.length} />
+              <SummaryMini label="Currency" value={company?.baseCurrency || "USD"} />
+              <SummaryMini label="Rule" value={company?.approvalRule || "hybrid"} />
+            </div>
+          )}
         </section>
       </div>
+    </div>
+  );
+}
+
+function QuickActionCard({ to, title, description, tone = "brand" }) {
+  const toneClasses = {
+    brand: "from-brand-50 via-white to-brand-50/60",
+    accent: "from-accent-50 via-white to-accent-50/70",
+    slate: "from-slate-50 via-white to-slate-100"
+  };
+
+  return (
+    <Link
+      to={to}
+      className={`rounded-[1.4rem] border border-slate-200/80 bg-gradient-to-r p-4 transition hover:border-brand-200 hover:shadow-soft dark:border-slate-800 dark:from-slate-950 dark:via-slate-900 dark:to-slate-950 ${toneClasses[tone] || toneClasses.brand}`}
+    >
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <p className="font-semibold text-slate-950 dark:text-slate-50">{title}</p>
+          <p className="mt-1 text-sm text-slate-500 dark:text-slate-300">{description}</p>
+        </div>
+        <ArrowRight className="text-brand-500" size={18} />
+      </div>
+    </Link>
+  );
+}
+
+function SummaryMini({ label, value }) {
+  return (
+    <div className="rounded-[1.3rem] border border-slate-200/80 bg-slate-50/80 p-4 dark:border-slate-800 dark:bg-slate-900/80">
+      <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-400">{label}</p>
+      <p className="mt-2 text-lg font-semibold text-slate-950 capitalize dark:text-slate-50">{value}</p>
     </div>
   );
 }

@@ -1,11 +1,20 @@
 from collections import defaultdict
+from csv import writer
 from datetime import datetime
+from io import StringIO
 
 from app.core.exceptions import ApiError
 from app.core.firebase import get_firestore_client
-from app.core.security import create_access_token, hash_password, verify_password
+from app.core.security import create_firebase_user, delete_firebase_user, sign_in_with_email_password
 from app.services.currency_service import convert_currency, get_default_currency_by_country
-from app.utils.constants import DEFAULT_WORKFLOW
+from app.utils.constants import (
+    DEFAULT_APPROVAL_THRESHOLD,
+    DEFAULT_AUTO_APPROVE_AMOUNT,
+    DEFAULT_HIGH_AMOUNT_REQUIRED_APPROVALS,
+    DEFAULT_HIGH_AMOUNT_THRESHOLD,
+    DEFAULT_WORKFLOW_STEPS,
+    VALID_APPROVAL_ROLES,
+)
 from app.utils.serialization import clean_email, isoformat, parse_iso_date, utc_now
 
 
@@ -34,6 +43,10 @@ def _update_document(collection_name: str, doc_id: str, data: dict):
     return _snapshot_to_dict(ref.get())
 
 
+def _delete_document(collection_name: str, doc_id: str):
+    _collection(collection_name).document(doc_id).delete()
+
+
 def _list_by_field(collection_name: str, field_name: str, value):
     return [_snapshot_to_dict(snapshot) for snapshot in _collection(collection_name).where(field_name, "==", value).stream()]
 
@@ -44,6 +57,44 @@ def _list_all(collection_name: str):
 
 def _sort_by_created_at(items: list[dict], reverse: bool = True):
     return sorted(items, key=lambda item: item.get("created_at") or datetime.min, reverse=reverse)
+
+
+def _normalize_workflow_steps(steps: list[dict] | None):
+    normalized = []
+    for index, step in enumerate(steps or DEFAULT_WORKFLOW_STEPS, start=1):
+        normalized.append(
+            {
+                "level_key": step.get("level_key", "").strip().lower(),
+                "label": step.get("label", "").strip(),
+                "approver_role": step.get("approver_role", step.get("level_key", "")).strip().lower(),
+                "step_order": index,
+            }
+        )
+    return normalized or DEFAULT_WORKFLOW_STEPS
+
+
+def _log_audit_event(
+    company_id: str,
+    actor_id: str | None,
+    action: str,
+    entity_type: str,
+    entity_id: str,
+    message: str,
+    metadata: dict | None = None,
+):
+    return _create_document(
+        "audit_logs",
+        {
+            "company_id": company_id,
+            "actor_id": actor_id,
+            "action": action,
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+            "message": message,
+            "metadata": metadata or {},
+            "created_at": utc_now(),
+        },
+    )
 
 
 def get_company_by_id(company_id: str):
@@ -79,28 +130,43 @@ def list_company_approvals(company_id: str):
     return _sort_by_created_at([approval for approval in _list_by_field("approvals", "company_id", company_id) if approval])
 
 
+def list_company_audit_logs(company_id: str):
+    return _sort_by_created_at([log for log in _list_by_field("audit_logs", "company_id", company_id) if log])
+
+
 def list_expense_approvals(expense_id: str):
     approvals = [approval for approval in _list_by_field("approvals", "expense_id", expense_id) if approval]
     return sorted(approvals, key=lambda item: item.get("step_order") or 0)
 
 
+def serialize_workflow_step(step: dict):
+    return {
+        "levelKey": step.get("level_key", ""),
+        "label": step.get("label", ""),
+        "approverRole": step.get("approver_role", ""),
+        "stepOrder": step.get("step_order"),
+    }
+
+
 def serialize_company(company: dict | None):
     if not company:
         return None
+    workflow_steps = company.get("workflow_steps") or DEFAULT_WORKFLOW_STEPS
     return {
         "_id": company["id"],
         "name": company.get("name", ""),
         "country": company.get("country", ""),
-        "baseCurrency": company.get("base_currency", "USD"),
+        "currency": company.get("currency", "USD"),
+        "baseCurrency": company.get("currency", "USD"),
         "approvalRule": company.get("approval_rule", "hybrid"),
-        "approvalThreshold": company.get("approval_threshold", 0.6),
-        "workflow": [
-            {
-                "levelKey": step.get("level_key", ""),
-                "label": step.get("label", ""),
-            }
-            for step in company.get("workflow", [])
-        ],
+        "approvalThreshold": company.get("approval_threshold", DEFAULT_APPROVAL_THRESHOLD),
+        "autoApproveAmount": company.get("auto_approve_amount", DEFAULT_AUTO_APPROVE_AMOUNT),
+        "highAmountThreshold": company.get("high_amount_threshold", DEFAULT_HIGH_AMOUNT_THRESHOLD),
+        "highAmountRequiredApprovals": company.get(
+            "high_amount_required_approvals",
+            DEFAULT_HIGH_AMOUNT_REQUIRED_APPROVALS,
+        ),
+        "workflowSteps": [serialize_workflow_step(step) for step in workflow_steps],
         "createdAt": isoformat(company.get("created_at")),
         "updatedAt": isoformat(company.get("updated_at")),
     }
@@ -115,6 +181,8 @@ def serialize_user_summary(user: dict | None):
         "email": user.get("email", ""),
         "role": user.get("role", "employee"),
         "approvalRoles": user.get("approval_roles", []),
+        "department": user.get("department", ""),
+        "title": user.get("title", ""),
     }
 
 
@@ -164,6 +232,9 @@ def serialize_expense(expense: dict, employee: dict | None = None, approvals: li
         "ocrMeta": serialize_ocr_meta(expense.get("ocr_meta")),
         "status": expense.get("status", "pending"),
         "currentStepOrder": expense.get("current_step_order"),
+        "requiredApprovalCount": expense.get("required_approval_count", 0),
+        "autoApproved": expense.get("auto_approved", False),
+        "automationHint": expense.get("automation_hint", ""),
         "finalDecisionReason": expense.get("final_decision_reason", ""),
         "createdAt": isoformat(expense.get("created_at")),
         "updatedAt": isoformat(expense.get("updated_at")),
@@ -190,12 +261,38 @@ def serialize_approval(approval: dict, approver: dict | None = None, acted_by: d
     }
 
 
-def build_auth_payload(user: dict, company: dict):
+def serialize_audit_log(log: dict, actor: dict | None = None):
     return {
-        "token": create_access_token(user["id"]),
+        "_id": log["id"],
+        "action": log.get("action", ""),
+        "entityType": log.get("entity_type", ""),
+        "entityId": log.get("entity_id", ""),
+        "message": log.get("message", ""),
+        "metadata": log.get("metadata", {}),
+        "actor": serialize_user_summary(actor) if actor else None,
+        "createdAt": isoformat(log.get("created_at")),
+    }
+
+
+def build_auth_payload(user: dict, company: dict, auth_session: dict):
+    return {
+        "token": auth_session.get("idToken"),
+        "refreshToken": auth_session.get("refreshToken"),
+        "expiresIn": int(auth_session.get("expiresIn", 3600)),
         "user": serialize_user(user, company=company, include_company=True),
         "company": serialize_company(company),
     }
+
+
+def _build_session_for_credentials(email: str, password: str):
+    auth_session = sign_in_with_email_password(email, password)
+    user = get_user_by_id(auth_session.get("localId", ""))
+    if not user:
+        raise ApiError(404, "No workspace profile was found for this Firebase account")
+    company = get_company_by_id(user["company_id"])
+    if not company:
+        raise ApiError(404, "Associated company was not found")
+    return build_auth_payload(user, company, auth_session)
 
 
 def create_company_and_admin(payload: dict):
@@ -203,51 +300,61 @@ def create_company_and_admin(payload: dict):
         raise ApiError(409, "A user with this email already exists")
 
     timestamp = utc_now()
-    company = _create_document(
-        "companies",
-        {
-            "name": payload["company_name"].strip(),
-            "country": payload["country"].strip(),
-            "base_currency": get_default_currency_by_country(payload["country"]),
-            "approval_rule": payload.get("approval_rule", "hybrid"),
-            "approval_threshold": 0.6,
-            "workflow": DEFAULT_WORKFLOW,
-            "created_at": timestamp,
-            "updated_at": timestamp,
-        },
-    )
+    company = None
+    firebase_user = None
 
-    user = _create_document(
-        "users",
-        {
-            "company_id": company["id"],
-            "name": payload["admin_name"].strip(),
-            "email": clean_email(payload["email"]),
-            "password_hash": hash_password(payload["password"]),
-            "role": "admin",
-            "approval_roles": ["finance", "director", "cfo"],
-            "manager_id": None,
-            "title": "Company Admin",
-            "department": "Finance",
-            "is_active": True,
-            "created_at": timestamp,
-            "updated_at": timestamp,
-        },
-    )
+    try:
+        company = _create_document(
+            "companies",
+            {
+                "name": payload["company_name"].strip(),
+                "country": payload["country"].strip(),
+                "currency": get_default_currency_by_country(payload["country"]),
+                "approval_rule": payload.get("approval_rule", "hybrid"),
+                "approval_threshold": DEFAULT_APPROVAL_THRESHOLD,
+                "auto_approve_amount": DEFAULT_AUTO_APPROVE_AMOUNT,
+                "high_amount_threshold": DEFAULT_HIGH_AMOUNT_THRESHOLD,
+                "high_amount_required_approvals": DEFAULT_HIGH_AMOUNT_REQUIRED_APPROVALS,
+                "workflow_steps": _normalize_workflow_steps(DEFAULT_WORKFLOW_STEPS),
+                "created_at": timestamp,
+                "updated_at": timestamp,
+            },
+        )
 
-    return build_auth_payload(user, company)
+        firebase_user = create_firebase_user(payload["email"], payload["password"], payload["admin_name"].strip())
+        user = _create_document(
+            "users",
+            {
+                "company_id": company["id"],
+                "name": payload["admin_name"].strip(),
+                "email": clean_email(payload["email"]),
+                "role": "admin",
+                "approval_roles": ["finance", "director", "cfo"],
+                "manager_id": None,
+                "title": "Company Admin",
+                "department": "Finance",
+                "is_active": True,
+                "created_at": timestamp,
+                "updated_at": timestamp,
+            },
+            doc_id=firebase_user.uid,
+        )
+    except Exception as exc:  # noqa: BLE001
+        if firebase_user:
+            delete_firebase_user(firebase_user.uid)
+        if company:
+            _delete_document("companies", company["id"])
+        if isinstance(exc, ApiError):
+            raise
+        raise ApiError(500, "Unable to create the company workspace") from exc
+
+    _log_audit_event(company["id"], user["id"], "company.created", "company", company["id"], "Company workspace created")
+    _log_audit_event(company["id"], user["id"], "user.created", "user", user["id"], "Admin account created")
+    return _build_session_for_credentials(payload["email"], payload["password"])
 
 
 def login_user(payload: dict):
-    user = find_user_by_email(payload["email"])
-    if not user or not verify_password(payload["password"], user.get("password_hash", "")):
-        raise ApiError(401, "Invalid email or password")
-
-    company = get_company_by_id(user["company_id"])
-    if not company:
-        raise ApiError(404, "Company not found")
-
-    return build_auth_payload(user, company)
+    return _build_session_for_credentials(payload["email"], payload["password"])
 
 
 def create_user_record(current_user: dict, payload: dict):
@@ -264,85 +371,143 @@ def create_user_record(current_user: dict, payload: dict):
         if not manager or manager.get("company_id") != current_user["company_id"]:
             raise ApiError(404, "Selected manager was not found")
 
-    approval_roles = [role for role in payload.get("approval_roles", []) if role in {"manager", "finance", "director", "cfo"}]
+    approval_roles = [role for role in payload.get("approval_roles", []) if role in VALID_APPROVAL_ROLES]
     if payload["role"] == "manager" and "manager" not in approval_roles:
         approval_roles.append("manager")
     if payload["role"] == "admin" and not approval_roles:
         approval_roles.extend(["finance", "director"])
 
     timestamp = utc_now()
-    user = _create_document(
-        "users",
-        {
-            "company_id": current_user["company_id"],
-            "name": payload["name"].strip(),
-            "email": clean_email(payload["email"]),
-            "password_hash": hash_password(payload["password"]),
-            "role": payload["role"],
-            "approval_roles": approval_roles,
-            "manager_id": manager_id or None,
-            "title": payload.get("title", "").strip(),
-            "department": payload.get("department", "").strip(),
-            "is_active": True,
-            "created_at": timestamp,
-            "updated_at": timestamp,
-        },
-    )
+    firebase_user = None
 
+    try:
+        firebase_user = create_firebase_user(payload["email"], payload["password"], payload["name"].strip())
+        user = _create_document(
+            "users",
+            {
+                "company_id": current_user["company_id"],
+                "name": payload["name"].strip(),
+                "email": clean_email(payload["email"]),
+                "role": payload["role"],
+                "approval_roles": approval_roles,
+                "manager_id": manager_id or None,
+                "title": payload.get("title", "").strip(),
+                "department": payload.get("department", "").strip(),
+                "is_active": True,
+                "created_at": timestamp,
+                "updated_at": timestamp,
+            },
+            doc_id=firebase_user.uid,
+        )
+    except Exception as exc:  # noqa: BLE001
+        if firebase_user:
+            delete_firebase_user(firebase_user.uid)
+        if isinstance(exc, ApiError):
+            raise
+        raise ApiError(500, "Unable to create the workspace user") from exc
+
+    _log_audit_event(
+        current_user["company_id"],
+        current_user["id"],
+        "user.created",
+        "user",
+        user["id"],
+        f"Created {payload['role']} user {payload['name'].strip()}",
+        metadata={"role": payload["role"]},
+    )
     return serialize_user(user, manager=manager)
 
 
 def list_users_for_actor(current_user: dict):
     users = list_company_users(current_user["company_id"])
     user_map = {user["id"]: user for user in users}
-
-    if current_user.get("role") == "manager":
-        team_users = [user for user in users if user["id"] == current_user["id"] or user.get("manager_id") == current_user["id"]]
-    else:
-        team_users = users
-
-    return [
-        serialize_user(user, manager=user_map.get(user.get("manager_id")))
-        for user in team_users
-    ]
+    return [serialize_user(user, manager=user_map.get(user.get("manager_id"))) for user in users]
 
 
-def resolve_workflow_approvers(employee: dict, company: dict, users: list[dict]):
-    manager_approver = next((user for user in users if user["id"] == employee.get("manager_id")), None)
-    if not manager_approver:
-        manager_approver = next((user for user in users if user.get("role") == "manager"), None)
-    if not manager_approver:
-        manager_approver = next((user for user in users if user.get("role") == "admin"), None)
+def get_company_settings_for_actor(current_user: dict):
+    return serialize_company(current_user["company"])
 
-    finance_approver = next((user for user in users if "finance" in user.get("approval_roles", [])), None)
-    if not finance_approver:
-        finance_approver = next((user for user in users if user.get("role") == "admin"), None)
 
-    director_approver = next(
+def update_company_settings(current_user: dict, payload: dict):
+    if current_user.get("role") != "admin":
+        raise ApiError(403, "Only admins can update company settings")
+
+    workflow_steps = _normalize_workflow_steps(payload.get("workflow_steps"))
+    updated_company = _update_document(
+        "companies",
+        current_user["company_id"],
+        {
+            "approval_rule": payload["approval_rule"],
+            "approval_threshold": payload["approval_threshold"],
+            "auto_approve_amount": payload["auto_approve_amount"],
+            "high_amount_threshold": payload["high_amount_threshold"],
+            "high_amount_required_approvals": payload["high_amount_required_approvals"],
+            "workflow_steps": workflow_steps,
+            "updated_at": utc_now(),
+        },
+    )
+    _log_audit_event(
+        current_user["company_id"],
+        current_user["id"],
+        "company.settings_updated",
+        "company",
+        current_user["company_id"],
+        "Updated company approval settings",
+    )
+    return serialize_company(updated_company)
+
+
+def _resolve_step_approver(step: dict, employee: dict, users: list[dict]):
+    approver_role = step.get("approver_role", step.get("level_key", "")).lower()
+
+    if approver_role == "manager":
+        direct_manager = next(
+            (
+                user
+                for user in users
+                if user["id"] == employee.get("manager_id") and user.get("is_active", True)
+            ),
+            None,
+        )
+        if direct_manager:
+            return direct_manager
+
+        return next(
+            (
+                user
+                for user in users
+                if user["id"] != employee["id"] and user.get("is_active", True) and user.get("role") in {"manager", "admin"}
+            ),
+            None,
+        )
+
+    return next(
         (
             user
             for user in users
-            if "director" in user.get("approval_roles", []) or "cfo" in user.get("approval_roles", [])
+            if user["id"] != employee["id"]
+            and user.get("is_active", True)
+            and (
+                approver_role in user.get("approval_roles", [])
+                or user.get("role") == approver_role
+                or (approver_role == "admin" and user.get("role") == "admin")
+            )
         ),
-        None,
+        next((user for user in users if user.get("role") == "admin" and user["id"] != employee["id"]), None),
     )
-    if not director_approver:
-        director_approver = next((user for user in users if user.get("role") == "admin"), None) or finance_approver
 
+
+def resolve_workflow_approvers(employee: dict, company: dict, users: list[dict]):
+    workflow_steps = company.get("workflow_steps") or DEFAULT_WORKFLOW_STEPS
     steps = []
-    for index, step in enumerate(company.get("workflow", DEFAULT_WORKFLOW), start=1):
-        if step.get("level_key") == "manager":
-            approver = manager_approver
-        elif step.get("level_key") == "finance":
-            approver = finance_approver or manager_approver
-        else:
-            approver = director_approver or finance_approver
 
+    for index, step in enumerate(workflow_steps, start=1):
+        approver = _resolve_step_approver(step, employee, users)
         if approver:
             steps.append(
                 {
-                    "level_key": step.get("level_key"),
-                    "label": step.get("label"),
+                    "level_key": step.get("level_key", ""),
+                    "label": step.get("label", ""),
                     "step_order": index,
                     "approver_id": approver["id"],
                 }
@@ -376,16 +541,14 @@ def _serialize_expense_list(expenses: list[dict], users: list[dict], approvals: 
     for expense_id in approval_groups:
         approval_groups[expense_id].sort(key=lambda item: item.get("stepOrder", 0))
 
-    serialized = []
-    for expense in expenses:
-        serialized.append(
-            serialize_expense(
-                expense,
-                employee=user_index.get(expense.get("employee_id")),
-                approvals=approval_groups.get(expense["id"], []),
-            )
+    return [
+        serialize_expense(
+            expense,
+            employee=user_index.get(expense.get("employee_id")),
+            approvals=approval_groups.get(expense["id"], []),
         )
-    return serialized
+        for expense in expenses
+    ]
 
 
 def get_expense_detail(expense_id: str):
@@ -393,12 +556,15 @@ def get_expense_detail(expense_id: str):
     if not expense:
         raise ApiError(404, "Expense not found")
 
-    company_id = expense["company_id"]
-    users, approvals, _expenses = _group_company_data(company_id)
+    users, approvals, _ = _group_company_data(expense["company_id"])
     user_index = _build_user_index(users)
     related_approvals = [approval for approval in approvals if approval.get("expense_id") == expense_id]
     serialized_approvals = [
-        serialize_approval(approval, approver=user_index.get(approval.get("approver_id")), acted_by=user_index.get(approval.get("acted_by_id")))
+        serialize_approval(
+            approval,
+            approver=user_index.get(approval.get("approver_id")),
+            acted_by=user_index.get(approval.get("acted_by_id")),
+        )
         for approval in sorted(related_approvals, key=lambda item: item.get("step_order", 0))
     ]
     return serialize_expense(expense, employee=user_index.get(expense.get("employee_id")), approvals=serialized_approvals)
@@ -406,9 +572,22 @@ def get_expense_detail(expense_id: str):
 
 def create_expense_record(current_user: dict, payload: dict):
     company = current_user["company"]
-    expense_date = parse_iso_date(payload["expense_date"])
-    conversion = convert_currency(payload["amount"], payload["currency"], company.get("base_currency", "USD"))
+    try:
+        expense_date = parse_iso_date(payload["expense_date"])
+    except ValueError as exc:
+        raise ApiError(422, str(exc), errors={"expenseDate": str(exc)}) from exc
+
+    conversion = convert_currency(payload["amount"], payload["currency"], company.get("currency", "USD"))
+    converted_amount = conversion["converted_amount"]
+    auto_limit = float(company.get("auto_approve_amount", DEFAULT_AUTO_APPROVE_AMOUNT))
+    high_amount_threshold = float(company.get("high_amount_threshold", DEFAULT_HIGH_AMOUNT_THRESHOLD))
+    high_amount_required_approvals = int(
+        company.get("high_amount_required_approvals", DEFAULT_HIGH_AMOUNT_REQUIRED_APPROVALS)
+    )
+
     timestamp = utc_now()
+    auto_approved = converted_amount < auto_limit
+    automation_hint = "Auto Approve" if converted_amount < auto_limit else ""
 
     expense = _create_document(
         "expenses",
@@ -417,8 +596,8 @@ def create_expense_record(current_user: dict, payload: dict):
             "employee_id": current_user["id"],
             "submitted_amount": round(payload["amount"], 2),
             "submitted_currency": payload["currency"].strip().upper(),
-            "converted_amount": conversion["converted_amount"],
-            "company_currency": company.get("base_currency", "USD"),
+            "converted_amount": converted_amount,
+            "company_currency": company.get("currency", "USD"),
             "exchange_rate": conversion["rate"],
             "conversion_source": conversion["source"],
             "category": payload["category"].strip(),
@@ -427,21 +606,44 @@ def create_expense_record(current_user: dict, payload: dict):
             "expense_date": expense_date,
             "receipt_image_path": payload.get("receipt_image_path", ""),
             "ocr_meta": {
-                "text": payload.get("ocr_meta", {}).get("text", ""),
-                "extracted_amount": payload.get("ocr_meta", {}).get("extracted_amount"),
-                "extracted_date": payload.get("ocr_meta", {}).get("extracted_date", ""),
-                "vendor_name": payload.get("ocr_meta", {}).get("vendor_name", ""),
+                "text": (payload.get("ocr_meta") or {}).get("text", ""),
+                "extracted_amount": (payload.get("ocr_meta") or {}).get("extracted_amount"),
+                "extracted_date": (payload.get("ocr_meta") or {}).get("extracted_date", ""),
+                "vendor_name": (payload.get("ocr_meta") or {}).get("vendor_name", ""),
             },
-            "status": "pending",
-            "current_step_order": 1,
-            "final_decision_reason": "",
+            "status": "approved" if auto_approved else "pending",
+            "current_step_order": None if auto_approved else 1,
+            "required_approval_count": 0,
+            "auto_approved": auto_approved,
+            "automation_hint": automation_hint,
+            "final_decision_reason": (
+                f"Auto-approved because the converted amount is below {company.get('currency', 'USD')} {auto_limit:.2f}"
+                if auto_approved
+                else ""
+            ),
             "created_at": timestamp,
             "updated_at": timestamp,
         },
     )
 
+    if auto_approved:
+        _log_audit_event(
+            current_user["company_id"],
+            current_user["id"],
+            "expense.auto_approved",
+            "expense",
+            expense["id"],
+            "Expense auto-approved below the company threshold",
+            metadata={"convertedAmount": converted_amount},
+        )
+        return get_expense_detail(expense["id"])
+
     users = list_company_users(current_user["company_id"])
     steps = resolve_workflow_approvers(current_user, company, users)
+    required_approval_count = (
+        min(high_amount_required_approvals, len(steps)) if converted_amount > high_amount_threshold else 0
+    )
+
     batch = get_firestore_client().batch()
     for index, step in enumerate(steps):
         ref = _collection("approvals").document()
@@ -463,8 +665,26 @@ def create_expense_record(current_user: dict, payload: dict):
                 "updated_at": timestamp,
             },
         )
+
+    expense_ref = _collection("expenses").document(expense["id"])
+    batch.update(
+        expense_ref,
+        {
+            "required_approval_count": required_approval_count,
+            "updated_at": timestamp,
+        },
+    )
     batch.commit()
 
+    _log_audit_event(
+        current_user["company_id"],
+        current_user["id"],
+        "expense.submitted",
+        "expense",
+        expense["id"],
+        "Expense submitted for approval",
+        metadata={"requiredApprovalCount": required_approval_count},
+    )
     return get_expense_detail(expense["id"])
 
 
@@ -491,66 +711,138 @@ def list_company_expenses_for_actor(current_user: dict):
 
 
 def list_pending_approvals(current_user: dict):
+    if current_user.get("role") not in {"admin", "manager"}:
+        raise ApiError(403, "You do not have access to the approval queue")
+
     users, approvals, expenses = _group_company_data(current_user["company_id"])
     user_index = _build_user_index(users)
     expense_index = {expense["id"]: expense for expense in expenses}
 
-    pending = [
-        approval
-        for approval in approvals
-        if approval.get("status") == "pending" and approval.get("is_current")
-    ]
-
+    pending = [approval for approval in approvals if approval.get("status") == "pending" and approval.get("is_current")]
     if current_user.get("role") != "admin":
         pending = [approval for approval in pending if approval.get("approver_id") == current_user["id"]]
 
     pending = sorted(pending, key=lambda item: item.get("created_at") or datetime.min)
 
-    serialized = []
-    for approval in pending:
-        expense = expense_index.get(approval.get("expense_id"))
-        expense_payload = (
-            serialize_expense(expense, employee=user_index.get(expense.get("employee_id"))) if expense else None
+    return [
+        serialize_approval(
+            approval,
+            approver=user_index.get(approval.get("approver_id")),
+            acted_by=user_index.get(approval.get("acted_by_id")),
+            expense=(
+                serialize_expense(
+                    expense_index[approval["expense_id"]],
+                    employee=user_index.get(expense_index[approval["expense_id"]].get("employee_id")),
+                )
+                if approval.get("expense_id") in expense_index
+                else None
+            ),
         )
-        serialized.append(
-            serialize_approval(
-                approval,
-                approver=user_index.get(approval.get("approver_id")),
-                acted_by=user_index.get(approval.get("acted_by_id")),
-                expense=expense_payload,
-            )
-        )
-    return serialized
+        for approval in pending
+    ]
 
 
-def _cfo_approved(approvals: list[dict], users: list[dict], current_user: dict):
-    if "cfo" in current_user.get("approval_roles", []):
-        return True
+def get_pending_expense_queue(current_user: dict):
+    return list_pending_approvals(current_user)
+
+
+def build_expense_report(current_user: dict, scope: str | None = None):
+    selected_scope = (scope or "").strip().lower()
+    if not selected_scope:
+        selected_scope = "company" if current_user.get("role") in {"admin", "manager"} else "my"
+
+    if selected_scope == "my":
+        expenses = list_my_expenses(current_user)
+    elif selected_scope == "company":
+        expenses = list_company_expenses_for_actor(current_user)
+    else:
+        raise ApiError(400, "Invalid report scope")
+
+    output = StringIO()
+    csv_writer = writer(output)
+    csv_writer.writerow(
+        [
+            "Expense ID",
+            "Employee",
+            "Department",
+            "Category",
+            "Submitted Amount",
+            "Submitted Currency",
+            "Converted Amount",
+            "Company Currency",
+            "Status",
+            "Expense Date",
+            "Vendor",
+            "Approval Steps",
+            "Final Decision",
+            "Created At",
+        ]
+    )
+
+    for expense in expenses:
+        csv_writer.writerow(
+            [
+                expense.get("_id", ""),
+                expense.get("employee", {}).get("name", ""),
+                expense.get("employee", {}).get("department", ""),
+                expense.get("category", ""),
+                expense.get("submittedAmount", 0),
+                expense.get("submittedCurrency", ""),
+                expense.get("convertedAmount", 0),
+                expense.get("companyCurrency", ""),
+                expense.get("status", ""),
+                expense.get("expenseDate", ""),
+                expense.get("vendorName", ""),
+                " | ".join(
+                    f"{approval.get('levelLabel', '')}:{approval.get('status', '')}" for approval in expense.get("approvals", [])
+                ),
+                expense.get("finalDecisionReason", ""),
+                expense.get("createdAt", ""),
+            ]
+        )
+
+    filename = f"expense-report-{selected_scope}-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}.csv"
+    return {"filename": filename, "content": output.getvalue()}
+
+
+def _cfo_approved(approvals: list[dict], users: list[dict]):
     user_index = _build_user_index(users)
     for approval in approvals:
-        if approval.get("status") == "approved":
-            approver = user_index.get(approval.get("approver_id"))
-            if approver and "cfo" in approver.get("approval_roles", []):
-                return True
+        if approval.get("status") != "approved":
+            continue
+        approver = user_index.get(approval.get("approver_id"))
+        if approver and "cfo" in approver.get("approval_roles", []):
+            return True
     return False
 
 
-def should_finalize_approval(company: dict, approvals: list[dict], users: list[dict], current_user: dict):
+def should_finalize_approval(expense: dict, company: dict, approvals: list[dict], users: list[dict]):
     approved_count = len([approval for approval in approvals if approval.get("status") == "approved"])
     total_count = len(approvals) or 1
-    approved_ratio = approved_count / total_count
-    all_approved = approved_count == total_count
-    meets_percentage = approved_ratio >= float(company.get("approval_threshold", 0.6))
-    cfo_approved = _cfo_approved(approvals, users, current_user)
+    approval_ratio = approved_count / total_count
+    cfo_approved = _cfo_approved(approvals, users)
+    required_approval_count = int(expense.get("required_approval_count") or 0)
+    approval_rule = company.get("approval_rule", "hybrid")
+    threshold = float(company.get("approval_threshold", DEFAULT_APPROVAL_THRESHOLD))
 
-    if company.get("approval_rule") == "percentage":
-        return all_approved or meets_percentage
-    if company.get("approval_rule") == "specific":
-        return all_approved or cfo_approved
-    return all_approved or meets_percentage or cfo_approved
+    if cfo_approved and approval_rule in {"specific", "hybrid"}:
+        return True, "Approved because CFO approval was received"
+
+    if required_approval_count:
+        if approved_count >= required_approval_count:
+            return True, f"Approved after {required_approval_count} required approvals"
+        return False, None
+
+    if approved_count == total_count:
+        return True, "Approved after all workflow steps completed"
+
+    if approval_rule in {"percentage", "hybrid"} and approval_ratio >= threshold:
+        return True, f"Approved after reaching {int(threshold * 100)}% of approvals"
+
+    return False, None
 
 
-def finalize_expense_status(expense_id: str, status: str, reason: str):
+def finalize_expense_status(expense_id: str, status: str, reason: str, actor_id: str | None = None):
     expense = get_expense_by_id(expense_id)
     if not expense:
         raise ApiError(404, "Expense not found")
@@ -581,13 +873,28 @@ def finalize_expense_status(expense_id: str, status: str, reason: str):
         },
     )
     batch.commit()
+
+    _log_audit_event(
+        expense["company_id"],
+        actor_id,
+        f"expense.{status}",
+        "expense",
+        expense_id,
+        reason,
+    )
     return get_expense_detail(expense_id)
 
 
 def process_approval_action(current_user: dict, approval_id: str, action: str, comment: str = ""):
+    if current_user.get("role") not in {"admin", "manager"}:
+        raise ApiError(403, "You do not have access to approvals")
+
     approval = get_approval_by_id(approval_id)
     if not approval:
         raise ApiError(404, "Approval not found")
+
+    if approval.get("company_id") != current_user["company_id"]:
+        raise ApiError(403, "You are not allowed to access this approval")
 
     if approval.get("status") != "pending" or not approval.get("is_current"):
         raise ApiError(400, "This approval step is no longer active")
@@ -598,11 +905,12 @@ def process_approval_action(current_user: dict, approval_id: str, action: str, c
         raise ApiError(403, "You are not allowed to action this approval")
 
     timestamp = utc_now()
+    new_status = "approved" if action == "approve" else "rejected"
     _update_document(
         "approvals",
         approval_id,
         {
-            "status": "approved" if action == "approve" else "rejected",
+            "status": new_status,
             "comment": comment,
             "is_current": False,
             "acted_at": timestamp,
@@ -611,21 +919,32 @@ def process_approval_action(current_user: dict, approval_id: str, action: str, c
         },
     )
 
+    _log_audit_event(
+        current_user["company_id"],
+        current_user["id"],
+        f"approval.{new_status}",
+        "approval",
+        approval_id,
+        f"{approval.get('level_label', 'Approval step')} {new_status}",
+        metadata={"expenseId": approval["expense_id"], "comment": comment},
+    )
+
     if action == "reject":
-        expense = finalize_expense_status(approval["expense_id"], "rejected", comment or "Rejected during approval")
+        expense = finalize_expense_status(
+            approval["expense_id"],
+            "rejected",
+            comment or "Rejected during approval",
+            actor_id=current_user["id"],
+        )
         return {"expense": expense}
 
     expense = get_expense_by_id(approval["expense_id"])
     approvals = list_expense_approvals(approval["expense_id"])
     users = list_company_users(current_user["company_id"])
 
-    if should_finalize_approval(current_user["company"], approvals, users, current_user):
-        reason = (
-            "Approved because CFO approval was received"
-            if "cfo" in current_user.get("approval_roles", [])
-            else "Approved because threshold or workflow completion was reached"
-        )
-        expense = finalize_expense_status(approval["expense_id"], "approved", reason)
+    should_finalize, reason = should_finalize_approval(expense, current_user["company"], approvals, users)
+    if should_finalize:
+        expense = finalize_expense_status(approval["expense_id"], "approved", reason or "Approved", actor_id=current_user["id"])
         return {"expense": expense}
 
     next_pending = next((item for item in approvals if item.get("status") == "pending"), None)
@@ -648,8 +967,37 @@ def process_approval_action(current_user: dict, approval_id: str, action: str, c
                 "updated_at": timestamp,
             },
         )
+        _log_audit_event(
+            current_user["company_id"],
+            current_user["id"],
+            "expense.routed",
+            "expense",
+            approval["expense_id"],
+            f"Expense moved to {next_pending.get('level_label', 'next')} approval step",
+            metadata={"nextApprovalId": next_pending["id"]},
+        )
 
     return {"expense": get_expense_detail(approval["expense_id"])}
+
+
+def process_expense_action(current_user: dict, expense_id: str, action: str, comment: str = ""):
+    expense = get_expense_by_id(expense_id)
+    if not expense or expense.get("company_id") != current_user["company_id"]:
+        raise ApiError(404, "Expense not found")
+
+    approvals = list_expense_approvals(expense_id)
+    active_approval = next((approval for approval in approvals if approval.get("status") == "pending" and approval.get("is_current")), None)
+    if not active_approval:
+        raise ApiError(400, "There is no active approval step for this expense")
+
+    return process_approval_action(current_user, active_approval["id"], action, comment)
+
+
+def list_audit_logs_for_actor(current_user: dict):
+    logs = list_company_audit_logs(current_user["company_id"])[:40]
+    users = list_company_users(current_user["company_id"])
+    user_index = _build_user_index(users)
+    return [serialize_audit_log(log, actor=user_index.get(log.get("actor_id"))) for log in logs]
 
 
 def clear_collection(collection_name: str):

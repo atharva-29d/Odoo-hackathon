@@ -1,8 +1,9 @@
-import { ImageUp, LoaderCircle, Receipt, ScanSearch, WandSparkles } from "lucide-react";
+import { ArrowRightLeft, ImageUp, LoaderCircle, Receipt, ScanSearch, WandSparkles } from "lucide-react";
 import { useState } from "react";
 
 import { api, extractErrorMessage, extractFieldErrors, serverBaseUrl } from "../api/client";
 import AlertBanner from "../components/AlertBanner";
+import DownloadReportButton from "../components/DownloadReportButton";
 import PageHeader from "../components/PageHeader";
 import { useAuth } from "../hooks/useAuth";
 import { currencyOptions, expenseCategories } from "../utils/constants";
@@ -26,6 +27,9 @@ function SubmitExpensePage() {
   const [selectedFile, setSelectedFile] = useState(null);
 
   const previewUrl = form.receiptImagePath ? `${serverBaseUrl}${form.receiptImagePath}` : "";
+  const numericAmount = Number(form.amount || 0);
+  const autoApproveEligible = numericAmount > 0 && numericAmount < Number(company?.autoApproveAmount || 1000);
+  const workflowPreview = company?.workflowSteps?.map((step) => step.label).join(" to ") || "Manager to Finance to Director";
 
   const handleChange = (event) => {
     const { name, value } = event.target;
@@ -108,12 +112,48 @@ function SubmitExpensePage() {
       <PageHeader
         eyebrow="Expense"
         title="Submit a new reimbursement"
-        description="Upload a receipt, autofill the key fields with OCR, and submit the claim in any supported currency."
+        description="Upload the receipt, review the auto-filled details, and send the request into your company approval flow."
+        actions={<DownloadReportButton scope="my" label="Download my report" />}
       />
+
+      <div className="mb-6 grid gap-4 lg:grid-cols-3">
+        <div className="metric-tile">
+          <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-400">Company currency</p>
+          <p className="mt-2 text-lg font-bold text-slate-950">{company?.baseCurrency || "USD"}</p>
+          <p className="mt-2 text-sm text-slate-500">All reimbursements are normalized to your workspace base currency.</p>
+        </div>
+        <div className="metric-tile">
+          <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-400">Approval path</p>
+          <p className="mt-2 text-lg font-bold text-slate-950">{workflowPreview}</p>
+          <p className="mt-2 text-sm text-slate-500">The request moves forward step by step only after the current approver confirms it.</p>
+        </div>
+        <div className="metric-tile">
+          <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-400">Quick guide</p>
+          <p className="mt-2 text-lg font-bold text-slate-950">Upload, review, submit</p>
+          <p className="mt-2 text-sm text-slate-500">Use OCR to prefill the form, then confirm the final values before sending.</p>
+        </div>
+      </div>
 
       <div className="grid gap-6 xl:grid-cols-[1.1fr_0.9fr]">
         <form className="card-shell space-y-5" onSubmit={handleSubmit}>
+          <div className="flex flex-col gap-3 border-b border-slate-100 pb-5 sm:flex-row sm:items-start sm:justify-between">
+            <div>
+              <h2 className="text-xl font-semibold text-slate-950">Expense details</h2>
+              <p className="mt-1 text-sm text-slate-500">Fill out the request carefully so approvers have the right context.</p>
+            </div>
+            <span className="mini-label">
+              <ArrowRightLeft size={14} />
+              Auto conversion enabled
+            </span>
+          </div>
+
           <AlertBanner type={banner.type} message={banner.message} />
+
+          {autoApproveEligible ? (
+            <div className="rounded-[1.5rem] border border-emerald-200 bg-emerald-50 px-4 py-4 text-sm text-emerald-800">
+              This amount is below your company auto-approve threshold of {company?.baseCurrency || "USD"} {company?.autoApproveAmount || 1000}. The expense will be auto-approved after submission.
+            </div>
+          ) : null}
 
           <div className="grid gap-5 md:grid-cols-2">
             <div>
@@ -183,14 +223,14 @@ function SubmitExpensePage() {
             {fieldErrors.description ? <p className="mt-2 text-xs font-medium text-rose-600">{fieldErrors.description}</p> : null}
           </div>
 
-          <div className="rounded-3xl border border-dashed border-slate-300 bg-slate-50 p-5">
+          <div className="rounded-[1.75rem] border border-dashed border-brand-200 bg-brand-50/50 p-5 dark:border-brand-400/30 dark:bg-brand-500/10">
             <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
               <div>
-                <p className="text-sm font-semibold text-slate-900">Receipt OCR</p>
-                <p className="mt-1 text-sm text-slate-500">Upload an image to extract amount, date, and vendor using local Tesseract OCR.</p>
+                <p className="text-sm font-semibold text-slate-900 dark:text-slate-100">Receipt OCR</p>
+                <p className="mt-1 text-sm text-slate-500 dark:text-slate-300">Upload an image to extract amount, date, and vendor using local Tesseract OCR.</p>
               </div>
               <div className="flex flex-wrap gap-3">
-                <label className="inline-flex cursor-pointer items-center gap-2 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-700 shadow-sm transition hover:border-brand-300 hover:text-brand-700">
+                <label className="inline-flex cursor-pointer items-center gap-2 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-700 shadow-sm transition hover:border-brand-300 hover:text-brand-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100">
                   <ImageUp size={16} />
                   {selectedFile ? selectedFile.name : "Choose receipt"}
                   <input type="file" accept="image/*" className="hidden" onChange={handleReceiptSelect} />
@@ -206,6 +246,21 @@ function SubmitExpensePage() {
                 </button>
               </div>
             </div>
+
+            <div className="mt-4 grid gap-3 sm:grid-cols-3">
+              <div className="rounded-2xl bg-white/90 px-4 py-3 dark:bg-slate-900">
+                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Extract amount</p>
+                <p className="mt-2 text-sm font-semibold text-slate-900 dark:text-slate-100">Receipt total</p>
+              </div>
+              <div className="rounded-2xl bg-white/90 px-4 py-3 dark:bg-slate-900">
+                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Extract date</p>
+                <p className="mt-2 text-sm font-semibold text-slate-900 dark:text-slate-100">Purchase date</p>
+              </div>
+              <div className="rounded-2xl bg-white/90 px-4 py-3 dark:bg-slate-900">
+                <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-400">Extract vendor</p>
+                <p className="mt-2 text-sm font-semibold text-slate-900 dark:text-slate-100">Merchant name</p>
+              </div>
+            </div>
           </div>
 
           <button
@@ -218,15 +273,15 @@ function SubmitExpensePage() {
           </button>
         </form>
 
-        <aside className="space-y-6">
+        <aside className="space-y-6 xl:sticky xl:top-8 xl:self-start">
           <div className="card-shell">
             <div className="flex items-center gap-3">
-              <div className="rounded-2xl bg-brand-50 p-3 text-brand-600">
+              <div className="rounded-2xl bg-brand-50 p-3 text-brand-600 dark:bg-brand-500/20 dark:text-brand-100">
                 <WandSparkles size={18} />
               </div>
               <div>
-                <h2 className="text-lg font-semibold text-slate-900">Autofill preview</h2>
-                <p className="text-sm text-slate-500">Review the extracted details before you send the claim.</p>
+                <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">Autofill preview</h2>
+                <p className="text-sm text-slate-500 dark:text-slate-300">Review the extracted details before you send the claim.</p>
               </div>
             </div>
 
@@ -238,12 +293,37 @@ function SubmitExpensePage() {
             </div>
           </div>
 
+          <div className="card-shell border border-slate-200 bg-gradient-to-br from-white via-slate-50 to-brand-50 text-slate-900 dark:border-slate-800 dark:from-slate-950 dark:via-slate-900 dark:to-slate-950 dark:text-slate-100">
+            <p className="text-sm font-semibold uppercase tracking-[0.25em] text-brand-600 dark:text-brand-100">Submission checklist</p>
+            <div className="mt-5 space-y-3">
+              {[
+                {
+                  title: "Describe the business purpose",
+                  description: "A clear explanation helps managers approve faster."
+                },
+                {
+                  title: "Confirm OCR suggestions",
+                  description: "Check the detected amount, date, and vendor before you submit."
+                },
+                {
+                  title: "Know what approvers will see",
+                  description: "Your claim is shown in the original currency and in company currency."
+                }
+              ].map((item) => (
+                <div key={item.title} className="rounded-2xl border border-slate-200/80 bg-white/90 px-4 py-4 dark:border-slate-800 dark:bg-slate-900/80">
+                  <p className="text-sm font-semibold text-slate-900 dark:text-slate-100">{item.title}</p>
+                  <p className="mt-1 text-sm leading-6 text-slate-500 dark:text-slate-300">{item.description}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+
           <div className="card-shell">
-            <h2 className="text-lg font-semibold text-slate-900">Receipt preview</h2>
+            <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100">Receipt preview</h2>
             {previewUrl ? (
               <img src={previewUrl} alt="Receipt preview" className="mt-4 h-80 w-full rounded-3xl object-cover" />
             ) : (
-              <div className="mt-4 flex h-80 items-center justify-center rounded-3xl border border-dashed border-slate-200 bg-slate-50 text-sm text-slate-400">
+              <div className="mt-4 flex h-80 items-center justify-center rounded-3xl border border-dashed border-slate-200 bg-slate-50 text-sm text-slate-400 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-500">
                 Upload a receipt to preview it here.
               </div>
             )}
@@ -256,9 +336,9 @@ function SubmitExpensePage() {
 
 function PreviewItem({ label, value }) {
   return (
-    <div className="rounded-2xl bg-slate-50 p-4">
+    <div className="rounded-2xl bg-slate-50 p-4 dark:bg-slate-900">
       <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-400">{label}</p>
-      <p className="mt-2 text-sm font-semibold text-slate-900">{value}</p>
+      <p className="mt-2 text-sm font-semibold text-slate-900 dark:text-slate-100">{value}</p>
     </div>
   );
 }

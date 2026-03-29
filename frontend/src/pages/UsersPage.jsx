@@ -97,6 +97,10 @@ function UsersPage() {
     return <LoadingScreen label="Loading users" />;
   }
 
+  const adminCount = users.filter((member) => member.role === "admin").length;
+  const managerCount = users.filter((member) => member.role === "manager").length;
+  const employeeCount = users.filter((member) => member.role === "employee").length;
+
   return (
     <div>
       <PageHeader
@@ -104,6 +108,13 @@ function UsersPage() {
         title="Users and roles"
         description="Create employees and managers, assign reporting lines, and configure special approver roles."
       />
+
+      <div className="mb-6 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <SummaryTile label="Total users" value={users.length} />
+        <SummaryTile label="Admins" value={adminCount} />
+        <SummaryTile label="Managers" value={managerCount} />
+        <SummaryTile label="Employees" value={employeeCount} />
+      </div>
 
       <div className="grid gap-6 xl:grid-cols-[0.95fr_1.05fr]">
         {user?.role === "admin" ? (
@@ -176,7 +187,7 @@ function UsersPage() {
               <label className="field-label">Approval roles</label>
               <div className="grid gap-3 sm:grid-cols-2">
                 {approvalRoleOptions.map((option) => (
-                  <label key={option.value} className="flex items-center gap-3 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-medium text-slate-700">
+                  <label key={option.value} className="flex items-center gap-3 rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm font-medium text-slate-700 transition hover:border-brand-300">
                     <input
                       type="checkbox"
                       checked={form.approvalRoles.includes(option.value)}
@@ -196,7 +207,7 @@ function UsersPage() {
               {isSubmitting ? "Creating..." : "Create user"}
             </button>
           </form>
-        ) : (
+          ) : (
           <div className="card-shell">
             <AlertBanner type={banner.type} message={banner.message} />
             <p className="text-sm text-slate-500">Managers can review the live team directory below.</p>
@@ -224,27 +235,27 @@ function UsersPage() {
             </div>
           ) : (
             <div className="mt-6 overflow-x-auto scrollbar-thin">
-              <table className="min-w-full text-left text-sm">
-                <thead className="text-slate-400">
+              <table className="data-table">
+                <thead>
                   <tr>
-                    <th className="pb-3 font-medium">Name</th>
-                    <th className="pb-3 font-medium">Role</th>
-                    <th className="pb-3 font-medium">Manager</th>
-                    <th className="pb-3 font-medium">Approval roles</th>
-                    <th className="pb-3 font-medium">Created</th>
+                    <th>Name</th>
+                    <th>Role</th>
+                    <th>Manager</th>
+                    <th>Approval roles</th>
+                    <th>Created</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-slate-100">
+                <tbody>
                   {users.map((member) => (
                     <tr key={member._id}>
-                      <td className="py-4">
+                      <td>
                         <p className="font-semibold text-slate-900">{member.name}</p>
                         <p className="text-xs text-slate-400">{member.email}</p>
                       </td>
-                      <td className="py-4 text-slate-600">{member.role}</td>
-                      <td className="py-4 text-slate-600">{member.manager?.name || "None"}</td>
-                      <td className="py-4 text-slate-600">{member.approvalRoles?.length ? member.approvalRoles.join(", ") : "-"}</td>
-                      <td className="py-4 text-slate-600">{formatDate(member.createdAt)}</td>
+                      <td className="capitalize">{member.role}</td>
+                      <td>{member.manager?.name || "None"}</td>
+                      <td>{member.approvalRoles?.length ? member.approvalRoles.join(", ") : "-"}</td>
+                      <td>{formatDate(member.createdAt)}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -253,6 +264,15 @@ function UsersPage() {
           )}
         </section>
       </div>
+    </div>
+  );
+}
+
+function SummaryTile({ label, value }) {
+  return (
+    <div className="metric-tile">
+      <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-400">{label}</p>
+      <p className="mt-2 text-2xl font-bold text-slate-950">{value}</p>
     </div>
   );
 }

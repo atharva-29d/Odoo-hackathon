@@ -1,6 +1,16 @@
 # Reimbursement Management System
 
-Hackathon-ready full-stack MVP for reimbursements with a React + Tailwind frontend, FastAPI backend, Firebase Firestore persistence, JWT auth, OCR receipt scanning, and multi-step approvals.
+Production-style reimbursement platform built with FastAPI, Firebase Firestore, Firebase Authentication, React, Vite, and Tailwind CSS.
+
+## Stack
+
+- Backend: FastAPI
+- Database: Firebase Firestore
+- Auth: Firebase Authentication with email/password
+- Frontend: React + Vite + Tailwind CSS
+- State: React Context
+- OCR: `pytesseract`
+- Live data: Firestore-backed APIs with frontend polling
 
 ## Folder Structure
 
@@ -16,6 +26,7 @@ Hackathon-ready full-stack MVP for reimbursements with a React + Tailwind fronte
 |   |   `-- utils
 |   |-- scripts
 |   |-- uploads
+|   |-- .env.example
 |   |-- main.py
 |   `-- requirements.txt
 |-- frontend
@@ -23,95 +34,153 @@ Hackathon-ready full-stack MVP for reimbursements with a React + Tailwind fronte
 |   |   |-- api
 |   |   |-- components
 |   |   |-- contexts
-|   |   |-- hooks
 |   |   |-- layouts
 |   |   |-- pages
 |   |   `-- utils
-|   `-- package.json
+|   `-- .env.example
 `-- README.md
 ```
 
-## Features
+## What’s Included
 
-- Signup creates a company plus the first admin user.
-- JWT login with role-based access for admin, manager, and employee.
-- Firestore collections for `companies`, `users`, `expenses`, and `approvals`.
-- Admin user management with manager assignment and approval-role assignment.
-- Employee expense submission with validation and receipt OCR autofill.
-- Multi-step approval workflow: Manager -> Finance -> Director.
-- Hybrid approval rule support:
-  - `percentage`: approve once at least 60% of steps approve.
-  - `specific`: approve once a CFO-designated approver approves.
-  - `hybrid`: either rule works.
-- Responsive SaaS-style dashboard with cards, tables, sidebar navigation, and mobile support.
+- Multi-company signup flow that creates a company and first admin.
+- Company currency lookup using the REST Countries API with fallback mapping.
+- Firebase Authentication login with backend token verification.
+- Firestore-scoped users, expenses, approvals, company settings, and audit logs.
+- Multi-level approval flow with admin-configurable workflow steps.
+- Conditional approval logic:
+  - 60% approval threshold
+  - CFO override
+  - Hybrid mode
+  - Auto-approve below company threshold
+  - High-amount flow requiring 3 approvals
+- OCR receipt scan for amount, date, and merchant extraction.
+- SaaS-style dashboard, approval queue, expense submission, my expenses, and admin panel.
 
-## Tech Stack
+## Firestore Collections
 
-- Frontend: React + Vite + Tailwind CSS
-- Backend: Python FastAPI
-- Database: Firebase Firestore
-- Auth: JWT
-- OCR: `pytesseract`
+- `companies`
+  - `name`
+  - `country`
+  - `currency`
+  - `approval_rule`
+  - `approval_threshold`
+  - `auto_approve_amount`
+  - `high_amount_threshold`
+  - `high_amount_required_approvals`
+  - `workflow_steps`
 
-## Firebase Setup
+- `users`
+  - `id` = Firebase Auth UID
+  - `email`
+  - `name`
+  - `role`
+  - `company_id`
+  - `manager_id`
+  - `approval_roles`
+  - `department`
+  - `title`
+
+- `expenses`
+  - `company_id`
+  - `employee_id`
+  - `submitted_amount`
+  - `submitted_currency`
+  - `converted_amount`
+  - `company_currency`
+  - `status`
+  - `category`
+  - `description`
+  - `expense_date`
+  - `receipt_image_path`
+  - `required_approval_count`
+  - `auto_approved`
+
+- `approvals`
+  - `expense_id`
+  - `company_id`
+  - `approver_id`
+  - `status`
+  - `step_order`
+  - `level_key`
+  - `level_label`
+  - `comment`
+  - `is_current`
+
+- `audit_logs`
+  - `company_id`
+  - `actor_id`
+  - `action`
+  - `entity_type`
+  - `entity_id`
+  - `message`
+  - `metadata`
+
+## Backend Setup
 
 1. Create a Firebase project.
-2. Open Firebase Console -> Build -> Firestore Database.
-3. Create the Firestore database in Native mode.
-4. Open Project Settings -> Service accounts.
-5. Generate a new private key JSON file.
-6. Save that JSON on your machine, for example:
-
-```text
-C:\Users\labhe\Downloads\firebase-service-account.json
-```
-
-7. In `backend/.env`, set:
+2. Enable:
+   - Firestore Database
+   - Authentication -> Email/Password
+3. Download a Firebase Admin SDK service account JSON.
+4. Copy `backend/.env.example` to `backend/.env`.
+5. Fill these values:
 
 ```env
-FIREBASE_CREDENTIALS_PATH=C:\Users\labhe\Downloads\firebase-service-account.json
+APP_NAME=Reimbursement API
+CLIENT_URL=http://localhost:5173
+FIREBASE_CREDENTIALS_PATH=C:\full\path\to\service-account.json
 FIREBASE_PROJECT_ID=your-firebase-project-id
+FIREBASE_WEB_API_KEY=your-firebase-web-api-key
+REST_COUNTRIES_API_URL=https://restcountries.com/v3.1
+EXCHANGE_RATE_API_URL=https://api.frankfurter.app
+TESSERACT_CMD=
+TESSERACT_LANG=eng
+HOST=127.0.0.1
+PORT=5000
 ```
 
-## Local Run Instructions
-
-### 1. Backend setup
+6. Install backend dependencies and run:
 
 ```powershell
 cd "c:\Users\labhe\OneDrive\Desktop\odoo hackthon\backend"
-Copy-Item .env.example .env
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 python scripts\seed.py
 python -m uvicorn main:app --reload --host 127.0.0.1 --port 5000
 ```
 
-### 2. Frontend setup
+## Frontend Setup
+
+1. Copy `frontend/.env.example` to `frontend/.env`.
+2. Install dependencies and start Vite:
 
 ```powershell
 cd "c:\Users\labhe\OneDrive\Desktop\odoo hackthon\frontend"
-Copy-Item .env.example .env
 npm install
 npm run dev
 ```
 
-Then open:
+Frontend environment file:
 
-```text
-http://localhost:5173
+```env
+VITE_API_URL=http://localhost:5000/api
+VITE_SERVER_URL=http://localhost:5000
 ```
 
-## Demo Credentials
+Open `http://localhost:5173`.
 
-- Admin: `admin@acme.local` / `password123`
-- Manager: `manager@acme.local` / `password123`
-- Employee: `employee@acme.local` / `password123`
-
-## Main API Endpoints
+## Core API Endpoints
 
 ### Auth
 
 - `POST /api/auth/signup`
 - `POST /api/auth/login`
+
+### Company
+
+- `GET /api/company/settings`
+- `PUT /api/company/settings`
+- `GET /api/company/audit-logs`
 
 ### Users
 
@@ -121,35 +190,42 @@ http://localhost:5173
 ### Expenses
 
 - `POST /api/expenses`
-- `GET /api/expenses/my`
 - `GET /api/expenses`
+- `GET /api/expenses/my`
+- `GET /api/expenses/pending`
+- `POST /api/expenses/{id}/approve`
+- `POST /api/expenses/{id}/reject`
 - `POST /api/expenses/ocr`
 
-### Approvals
+### Compatibility Approval Routes
 
 - `GET /api/approvals/pending`
 - `POST /api/approvals/{id}/approve`
 - `POST /api/approvals/{id}/reject`
 
-## Sample Data
+## Demo Seed Data
 
 The seed script creates:
 
-- One company: `Acme Reimbursements`
-- One admin
-- One manager
-- Two employees
-- One pending expense
-- One approved expense
+- `Acme Reimbursements`
+- `admin@acme.local / password123`
+- `manager@acme.local / password123`
+- `employee@acme.local / password123`
+- `nisha@acme.local / password123`
+- pending and approved sample expenses
 
 ## Notes
 
-- The frontend polls every 15 seconds so judge demos show live Firestore-backed changes without manual refresh.
-- OCR requires Tesseract to be installed locally. If it is not on PATH, set `TESSERACT_CMD` in `backend/.env`.
-- Firestore is the source of truth for all business data. No static JSON is used for app records.
+- Login and signup use real Firebase Authentication.
+- All business data is company-scoped in Firestore.
+- Country currency lookup uses the REST Countries API with fallback mapping.
+- Exchange conversion uses Frankfurter live rates with offline fallback values.
+- Frontend polling keeps dashboards fresh for demo use without manual refresh.
+- OCR requires local Tesseract installation.
 
 ## Verification
 
-- Python source compiles with `python -m compileall backend\app backend\scripts backend\main.py`.
-- Frontend production build previously passed with `npm run build`.
-- Full backend runtime still depends on valid Firebase credentials in `backend/.env`.
+- Backend source compiled with `python -m compileall backend\app backend\main.py backend\scripts`
+- Backend app import passed with `backend\.venv\Scripts\python.exe -c "import main; print(main.app.title)"`
+- Frontend production build passed with `npm run build`
+- Full runtime still depends on valid Firebase credentials, enabled Auth, and a valid Firebase Web API key

@@ -37,8 +37,17 @@ FALLBACK_RATES = {
     "ZAR": 18.35,
 }
 
-DEFAULT_WORKFLOW = [
-    {"level_key": "manager", "label": "Manager"},
-    {"level_key": "finance", "label": "Finance"},
-    {"level_key": "director", "label": "Director"},
+VALID_APP_ROLES = {"admin", "manager", "employee"}
+VALID_APPROVAL_ROLES = {"manager", "finance", "director", "cfo", "admin"}
+VALID_APPROVAL_RULES = {"percentage", "specific", "hybrid"}
+
+DEFAULT_APPROVAL_THRESHOLD = 0.6
+DEFAULT_AUTO_APPROVE_AMOUNT = 1000
+DEFAULT_HIGH_AMOUNT_THRESHOLD = 5000
+DEFAULT_HIGH_AMOUNT_REQUIRED_APPROVALS = 3
+
+DEFAULT_WORKFLOW_STEPS = [
+    {"level_key": "manager", "label": "Manager", "approver_role": "manager"},
+    {"level_key": "finance", "label": "Finance", "approver_role": "finance"},
+    {"level_key": "director", "label": "Director", "approver_role": "director"},
 ]

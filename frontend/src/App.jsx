@@ -4,13 +4,13 @@ import LoadingScreen from "./components/LoadingScreen";
 import ProtectedRoute from "./components/ProtectedRoute";
 import PublicRoute from "./components/PublicRoute";
 import AppLayout from "./layouts/AppLayout";
+import AdminPanelPage from "./pages/AdminPanelPage";
 import ApprovalsPage from "./pages/ApprovalsPage";
 import DashboardPage from "./pages/DashboardPage";
 import LoginPage from "./pages/LoginPage";
 import MyExpensesPage from "./pages/MyExpensesPage";
 import SignupPage from "./pages/SignupPage";
 import SubmitExpensePage from "./pages/SubmitExpensePage";
-import UsersPage from "./pages/UsersPage";
 import { useAuth } from "./hooks/useAuth";
 
 function App() {
@@ -59,10 +59,10 @@ function App() {
           }
         />
         <Route
-          path="/users"
+          path="/admin"
           element={
-            <ProtectedRoute roles={["admin", "manager"]}>
-              <UsersPage />
+            <ProtectedRoute roles={["admin"]}>
+              <AdminPanelPage />
             </ProtectedRoute>
           }
         />

@@ -2,7 +2,7 @@ from fastapi import Depends
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.core.exceptions import ApiError
-from app.core.security import decode_access_token
+from app.core.security import verify_firebase_token
 from app.services.reimbursement_service import get_company_by_id, get_user_by_id
 
 security = HTTPBearer(auto_error=False)
@@ -12,7 +12,10 @@ def get_current_user(credentials: HTTPAuthorizationCredentials | None = Depends(
     if credentials is None or not credentials.credentials:
         raise ApiError(401, "Authentication required")
 
-    user_id = decode_access_token(credentials.credentials)
+    token_data = verify_firebase_token(credentials.credentials)
+    user_id = token_data.get("uid")
+    if not user_id:
+        raise ApiError(401, "Invalid Firebase session")
     user = get_user_by_id(user_id)
 
     if not user or not user.get("is_active", True):
